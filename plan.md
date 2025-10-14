@@ -98,6 +98,10 @@ Gold tracked separately.
 
 Optional drop log message.
 
+Guardrails:
+- Skip consuming potions when HP/Mana are already full; emit a log message instead so players do not lose items to accidental taps.
+- Ensure pickup feedback differentiates between stacking consumables versus permanent upgrades for clearer UX.
+
 5.6 Spellcasting
 Arcane Bolt (f key): costs mana, targets nearest visible monster within range, deals magic damage ignoring defense.
 
@@ -153,6 +157,11 @@ Polish: Animations (optional), message log formatting, ensure actions toggle pro
 
 Testing: Manual verification in browser; check random seeds by logging, ensure input works.
 
+Resilience fixes:
+- When generating monsters/items, gracefully handle maps that end up with only the starting room so RNG.choice is never called on an empty list.
+- Add smoke tests (Playwright or Cypress) that load the game, confirm the canvas renders, move the player one tile, and validate sidebar updates.
+- Wrap optional browser APIs (localStorage) in feature detection for environments where access might be blocked.
+
 7. Potential Challenges & Mitigations
 Procedural Generation Artifacts: Ensure room overlap checks include a 1-tile buffer; clamp corridors within map bounds.
 
@@ -176,4 +185,9 @@ Add toggle in console to reveal entire map for debugging (Game.debugReveal()).
 Verify FOV by logging visible coordinates.
 
 Check for collisions by ensuring isBlocked functions exclude dead monsters.
+
+9. Maintenance & Refactoring Opportunities
+- Split the monolithic HTML/JS bundle into ES modules (Game, Map, Entities, UI) to improve readability and enable targeted unit tests.
+- Extract UI updates into dedicated render helpers so DOM manipulation can be mocked during tests.
+- Capture design decisions (e.g., damage formulas, spawn rates) in constants/config files for easier balancing tweaks.
 
