@@ -1,0 +1,895 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>RogueJS - Browser Roguelike</title>
+<style>
+  :root {
+    color-scheme: dark;
+    font-family: "Fira Mono", "Courier New", monospace;
+  }
+  body {
+    margin: 0;
+    background: #0b0d12;
+    color: #f0f4f8;
+    display: flex;
+    justify-content: center;
+    padding: 12px;
+  }
+  #game-wrapper {
+    display: flex;
+    gap: 16px;
+  }
+  canvas {
+    border: 2px solid #1f2430;
+    background: #080a0f;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+  }
+  #sidebar {
+    width: 240px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    font-size: 14px;
+  }
+  #sidebar h1 {
+    margin: 0;
+    font-size: 20px;
+    letter-spacing: 1px;
+    color: #93e0ff;
+    text-transform: uppercase;
+  }
+  .panel {
+    border: 1px solid #1f2430;
+    background: #111722;
+    padding: 8px;
+    border-radius: 4px;
+  }
+  #log {
+    height: 140px;
+    overflow: hidden;
+  }
+  #log p {
+    margin: 0 0 4px;
+    font-size: 13px;
+    color: #e0edf5;
+  }
+  .dim {
+    color: #7d8898;
+  }
+  #overlay {
+    position: absolute;
+    inset: 12px 0 0 0;
+    display: flex;
+    justify-content: center;
+    pointer-events: none;
+  }
+  #overlay .message {
+    pointer-events: auto;
+    margin-top: 140px;
+    padding: 16px 24px;
+    background: rgba(8, 10, 15, 0.92);
+    border: 1px solid #93e0ff;
+    border-radius: 6px;
+    text-align: center;
+    font-size: 18px;
+  }
+</style>
+</head>
+<body>
+<div id="overlay" hidden>
+  <div class="message">
+    <p id="overlay-text"></p>
+    <p class="dim">Press Enter to begin a new run.</p>
+  </div>
+</div>
+<div id="game-wrapper">
+  <canvas id="gameCanvas" width="1280" height="400"></canvas>
+  <aside id="sidebar">
+    <h1>RogueJS</h1>
+    <div id="stats" class="panel"></div>
+    <div id="inventory" class="panel"></div>
+    <div id="log" class="panel"></div>
+    <div id="controls" class="panel"></div>
+    <div id="highscore" class="panel"></div>
+  </aside>
+</div>
+
+<script>
+// ===== Utility Helpers ======================================================
+const RNG = {
+  int(min, max) {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+  },
+  choice(list) {
+    return list[Math.floor(Math.random() * list.length)];
+  }
+};
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function distance(a, b) {
+  const dx = a.x - b.x;
+  const dy = a.y - b.y;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+function bresenhamLine(x0, y0, x1, y1) {
+  const points = [];
+  const dx = Math.abs(x1 - x0);
+  const dy = Math.abs(y1 - y0);
+  const sx = x0 < x1 ? 1 : -1;
+  const sy = y0 < y1 ? 1 : -1;
+  let err = dx - dy;
+  while (true) {
+    points.push({ x: x0, y: y0 });
+    if (x0 === x1 && y0 === y1) break;
+    const e2 = err * 2;
+    if (e2 > -dy) { err -= dy; x0 += sx; }
+    if (e2 < dx) { err += dx; y0 += sy; }
+  }
+  return points;
+}
+
+// ===== Tile & Map Generation ===============================================
+const MAP_WIDTH = 80;
+const MAP_HEIGHT = 25;
+const TILE_SIZE = 16;
+const FOV_RADIUS = 8;
+
+const TileType = {
+  Wall: "wall",
+  Floor: "floor",
+  Stairs: "stairs"
+};
+
+function createTile(type = TileType.Wall) {
+  return { type, visible: false, explored: false };
+}
+
+function intersects(a, b) {
+  return (
+    a.x <= b.x + b.w &&
+    a.x + a.w >= b.x &&
+    a.y <= b.y + b.h &&
+    a.y + a.h >= b.y
+  );
+}
+
+function carveRoom(tiles, room) {
+  for (let y = room.y; y < room.y + room.h; y++) {
+    for (let x = room.x; x < room.x + room.w; x++) {
+      tiles[y][x].type = TileType.Floor;
+    }
+  }
+}
+
+function carveHorizontalTunnel(tiles, x1, x2, y) {
+  for (let x = Math.min(x1, x2); x <= Math.max(x1, x2); x++) {
+    tiles[y][x].type = TileType.Floor;
+  }
+}
+
+function carveVerticalTunnel(tiles, y1, y2, x) {
+  for (let y = Math.min(y1, y2); y <= Math.max(y1, y2); y++) {
+    tiles[y][x].type = TileType.Floor;
+  }
+}
+
+function generateDungeon(depth = 1) {
+  const tiles = Array.from({ length: MAP_HEIGHT }, () =>
+    Array.from({ length: MAP_WIDTH }, () => createTile())
+  );
+
+  const rooms = [];
+  const maxRooms = 12 + Math.floor(depth / 2);
+  const minSize = 4;
+  const maxSize = 10;
+
+  for (let i = 0; i < maxRooms; i++) {
+    const w = RNG.int(minSize, maxSize);
+    const h = RNG.int(minSize, maxSize);
+    const x = RNG.int(1, MAP_WIDTH - w - 1);
+    const y = RNG.int(1, MAP_HEIGHT - h - 1);
+    const newRoom = { x, y, w, h };
+
+    let failed = false;
+    for (const other of rooms) {
+      if (intersects(
+        { x: newRoom.x - 1, y: newRoom.y - 1, w: newRoom.w + 2, h: newRoom.h + 2 },
+        other
+      )) {
+        failed = true;
+        break;
+      }
+    }
+    if (failed) continue;
+
+    carveRoom(tiles, newRoom);
+    const center = {
+      x: Math.floor(newRoom.x + newRoom.w / 2),
+      y: Math.floor(newRoom.y + newRoom.h / 2)
+    };
+    newRoom.center = center;
+
+    if (rooms.length > 0) {
+      const prev = rooms[rooms.length - 1].center;
+      if (Math.random() < 0.5) {
+        carveHorizontalTunnel(tiles, prev.x, center.x, prev.y);
+        carveVerticalTunnel(tiles, prev.y, center.y, center.x);
+      } else {
+        carveVerticalTunnel(tiles, prev.y, center.y, prev.x);
+        carveHorizontalTunnel(tiles, prev.x, center.x, center.y);
+      }
+    }
+    rooms.push(newRoom);
+  }
+
+  if (rooms.length === 0) {
+    // Fallback: regenerate if room placement completely failed
+    return generateDungeon(depth);
+  }
+
+  const stairsRoom = rooms[rooms.length - 1];
+  const stairs = { ...stairsRoom.center };
+  tiles[stairs.y][stairs.x].type = TileType.Stairs;
+
+  return { tiles, rooms, stairs };
+}
+
+// ===== Entities ============================================================
+const MonsterTemplates = [
+  { name: "Goblin", char: "g", color: "#6fbf3b", hp: 8, attack: 2, defense: 1, xp: 5 },
+  { name: "Orc", char: "o", color: "#8f5b2f", hp: 14, attack: 3, defense: 2, xp: 8 },
+  { name: "Cultist", char: "c", color: "#d66aff", hp: 10, attack: 2, defense: 1, xp: 7 },
+  { name: "Troll", char: "T", color: "#3dbf9a", hp: 20, attack: 4, defense: 3, xp: 12 },
+  { name: "Slime", char: "s", color: "#4bd0ff", hp: 12, attack: 2, defense: 0, xp: 6 }
+];
+
+const ItemDefinitions = {
+  healthPotion() {
+    return {
+      char: "!",
+      color: "#ff4b4b",
+      type: "healthPotion",
+      name: "Health Potion",
+      heal: 12
+    };
+  },
+  manaPotion() {
+    return {
+      char: "!",
+      color: "#6c8bff",
+      type: "manaPotion",
+      name: "Mana Potion",
+      mana: 8
+    };
+  },
+  weapon(depth) {
+    const bonus = RNG.int(1, 1 + Math.floor(depth / 2));
+    return {
+      char: "/",
+      color: "#e0e0e0",
+      type: "weapon",
+      name: `Fine Blade (+${bonus} atk)`,
+      attackBonus: bonus
+    };
+  },
+  gold(depth) {
+    const amount = RNG.int(5, 10 + depth * 3);
+    return {
+      char: "$",
+      color: "#f5d442",
+      type: "gold",
+      name: `${amount} Gold`,
+      amount
+    };
+  }
+};
+
+function createMonster(depth) {
+  const template = RNG.choice(MonsterTemplates);
+  const scale = 1 + depth * 0.15;
+  return {
+    ...template,
+    hp: Math.ceil(template.hp * scale),
+    attack: Math.ceil(template.attack * (1 + depth * 0.1)),
+    defense: Math.ceil(template.defense * (1 + depth * 0.05)),
+    xpReward: Math.ceil(template.xp * (1 + depth * 0.2)),
+    x: 0,
+    y: 0,
+    alive: true
+  };
+}
+
+function createPlayer() {
+  return {
+    char: "@",
+    color: "#ffffff",
+    x: 0,
+    y: 0,
+    hp: 28,
+    maxHp: 28,
+    mana: 12,
+    maxMana: 12,
+    attack: 4,
+    defense: 2,
+    level: 1,
+    xp: 0,
+    nextLevelXp: 20,
+    inventory: [],
+    gold: 0,
+    kills: 0
+  };
+}
+
+// ===== Game State ==========================================================
+const canvas = document.getElementById("gameCanvas");
+const ctx = canvas.getContext("2d");
+ctx.textBaseline = "bottom";
+ctx.font = `${TILE_SIZE - 2}px "Fira Mono", "Courier New", monospace`;
+
+const Game = {
+  depth: 1,
+  map: null,
+  player: createPlayer(),
+  monsters: [],
+  items: [],
+  log: [],
+  gameOver: false,
+  score: 0,
+  highScore: 0,
+  overlay: document.getElementById("overlay"),
+  overlayText: document.getElementById("overlay-text"),
+
+  init() {
+    this.loadHighScore();
+    this.setupUI();
+    this.startNewRun();
+    window.addEventListener("keydown", (e) => this.handleInput(e));
+  },
+
+  loadHighScore() {
+    try {
+      this.highScore = parseInt(localStorage.getItem("roguejs_highscore") || "0", 10);
+    } catch {
+      this.highScore = 0;
+    }
+    this.updateHighScorePanel();
+  },
+
+  saveHighScore() {
+    if (this.score > this.highScore) {
+      this.highScore = this.score;
+      try {
+        localStorage.setItem("roguejs_highscore", String(this.highScore));
+      } catch {
+        // ignore storage failures
+      }
+      this.updateHighScorePanel();
+    }
+  },
+
+  setupUI() {
+    document.getElementById("controls").innerHTML = `
+      <strong>Controls</strong><br/>
+      Move: Arrow Keys / WASD<br/>
+      Wait: Space / .<br/>
+      Pickup: G<br/>
+      Use Health Potion: H<br/>
+      Use Mana Potion: M<br/>
+      Cast Arcane Bolt: F<br/>
+      Descend Stairs: Enter / &gt;<br/>
+    `;
+  },
+
+  startNewRun() {
+    this.depth = 1;
+    this.player = createPlayer();
+    this.score = 0;
+    this.log = [];
+    this.gameOver = false;
+    this.overlay.hidden = true;
+    this.startFloor();
+    this.logMessage("Welcome to the dungeon!");
+    this.render();
+  },
+
+  startFloor() {
+    const dungeon = generateDungeon(this.depth);
+    this.map = dungeon;
+    const startRoom = dungeon.rooms[0];
+    this.player.x = startRoom.center.x;
+    this.player.y = startRoom.center.y;
+
+    this.monsters = [];
+    const monsterRooms = dungeon.rooms.slice(1);
+    for (const room of monsterRooms) {
+      const monsterCount = RNG.int(1, 1 + Math.floor(this.depth / 2));
+      for (let i = 0; i < monsterCount; i++) {
+        const monster = createMonster(this.depth);
+        let attempts = 20;
+        while (attempts-- > 0) {
+          const x = RNG.int(room.x, room.x + room.w - 1);
+          const y = RNG.int(room.y, room.y + room.h - 1);
+          if (!this.isBlocked(x, y)) {
+            monster.x = x;
+            monster.y = y;
+            this.monsters.push(monster);
+            break;
+          }
+        }
+      }
+    }
+
+    this.items = [];
+    const itemRooms = dungeon.rooms.slice(1);
+    const itemCount = 6 + Math.floor(this.depth / 2);
+    for (let i = 0; i < itemCount; i++) {
+      const room = RNG.choice(itemRooms);
+      const x = RNG.int(room.x, room.x + room.w - 1);
+      const y = RNG.int(room.y, room.y + room.h - 1);
+      if (this.isBlocked(x, y) || this.itemAt(x, y)) continue;
+      const roll = Math.random();
+      let item;
+      if (roll < 0.35) item = ItemDefinitions.healthPotion();
+      else if (roll < 0.6) item = ItemDefinitions.manaPotion();
+      else if (roll < 0.8) item = ItemDefinitions.weapon(this.depth);
+      else item = ItemDefinitions.gold(this.depth);
+      this.items.push({ ...item, x, y });
+    }
+
+    this.computeFOV();
+    this.updateSidebar();
+    this.render();
+  },
+
+  handleInput(event) {
+    if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " "].includes(event.key)) {
+      event.preventDefault();
+    }
+
+    if (this.gameOver) {
+      if (event.key === "Enter") {
+        this.startNewRun();
+      }
+      return;
+    }
+
+    const key = event.key;
+    let acted = false;
+
+    const moveKeys = {
+      ArrowUp: { dx: 0, dy: -1 },
+      w: { dx: 0, dy: -1 },
+      ArrowDown: { dx: 0, dy: 1 },
+      s: { dx: 0, dy: 1 },
+      ArrowLeft: { dx: -1, dy: 0 },
+      a: { dx: -1, dy: 0 },
+      ArrowRight: { dx: 1, dy: 0 },
+      d: { dx: 1, dy: 0 }
+    };
+
+    if (moveKeys[key]) {
+      acted = this.attemptPlayerMove(moveKeys[key].dx, moveKeys[key].dy);
+    } else if (key === "." || key === " ") {
+      this.logMessage("You wait for a moment.");
+      acted = true;
+    } else if (key === "g" || key === "G") {
+      acted = this.pickupItem();
+    } else if (key === "h" || key === "H") {
+      acted = this.useHealthPotion();
+    } else if (key === "m" || key === "M") {
+      acted = this.useManaPotion();
+    } else if (key === "f" || key === "F") {
+      acted = this.castArcaneBolt();
+    } else if (key === "Enter" || key === ">") {
+      acted = this.tryDescend();
+    }
+
+    if (acted) {
+      this.endPlayerTurn();
+    }
+  },
+
+  endPlayerTurn() {
+    this.monsterTurn();
+    this.computeFOV();
+    this.updateSidebar();
+    this.render();
+  },
+
+  attemptPlayerMove(dx, dy) {
+    const nx = this.player.x + dx;
+    const ny = this.player.y + dy;
+    if (!this.inBounds(nx, ny)) return false;
+    if (this.map.tiles[ny][nx].type === TileType.Wall) return false;
+
+    const monster = this.monsterAt(nx, ny);
+    if (monster) {
+      this.playerAttack(monster);
+      return true;
+    }
+
+    this.player.x = nx;
+    this.player.y = ny;
+    return true;
+  },
+
+  tryDescend() {
+    const tile = this.map.tiles[this.player.y][this.player.x];
+    if (tile.type === TileType.Stairs) {
+      this.depth += 1;
+      this.logMessage(`You descend to dungeon level ${this.depth}.`);
+      this.player.hp = Math.min(this.player.maxHp, this.player.hp + 4);
+      this.player.mana = Math.min(this.player.maxMana, this.player.mana + 4);
+      this.startFloor();
+      return true;
+    } else {
+      this.logMessage("There are no stairs here.");
+      return false;
+    }
+  },
+
+  pickupItem() {
+    const index = this.items.findIndex(
+      (item) => item.x === this.player.x && item.y === this.player.y
+    );
+    if (index === -1) {
+      this.logMessage("There is nothing to pick up.");
+      return false;
+    }
+    const item = this.items.splice(index, 1)[0];
+    switch (item.type) {
+      case "healthPotion":
+        this.player.inventory.push(item);
+        this.logMessage("You pick up a health potion.");
+        break;
+      case "manaPotion":
+        this.player.inventory.push(item);
+        this.logMessage("You pick up a mana potion.");
+        break;
+      case "weapon":
+        this.player.inventory.push(item);
+        this.player.attack += item.attackBonus;
+        this.logMessage(`You equip ${item.name}. Attack increases!`);
+        break;
+      case "gold":
+        this.player.gold += item.amount;
+        this.logMessage(`You scoop up ${item.amount} gold.`);
+        break;
+      default:
+        this.logMessage("You pick up something strange.");
+    }
+    return true;
+  },
+
+  useHealthPotion() {
+    const index = this.player.inventory.findIndex((item) => item.type === "healthPotion");
+    if (index === -1) {
+      this.logMessage("You have no health potions.");
+      return false;
+    }
+    const potion = this.player.inventory.splice(index, 1)[0];
+    const healed = Math.min(potion.heal, this.player.maxHp - this.player.hp);
+    this.player.hp += healed;
+    this.logMessage(`You quaff a potion and recover ${healed} HP.`);
+    return true;
+  },
+
+  useManaPotion() {
+    const index = this.player.inventory.findIndex((item) => item.type === "manaPotion");
+    if (index === -1) {
+      this.logMessage("You have no mana potions.");
+      return false;
+    }
+    const potion = this.player.inventory.splice(index, 1)[0];
+    const restored = Math.min(potion.mana, this.player.maxMana - this.player.mana);
+    this.player.mana += restored;
+    this.logMessage(`You drink a mana potion and regain ${restored} mana.`);
+    return true;
+  },
+
+  castArcaneBolt() {
+    const manaCost = 5;
+    if (this.player.mana < manaCost) {
+      this.logMessage("Not enough mana.");
+      return false;
+    }
+    const visibleMonsters = this.monsters.filter(
+      (m) => m.alive && this.isVisible(m.x, m.y) && distance(m, this.player) <= 6
+    );
+    if (visibleMonsters.length === 0) {
+      this.logMessage("No targets in sight.");
+      return false;
+    }
+    visibleMonsters.sort((a, b) => distance(a, this.player) - distance(b, this.player));
+    const target = visibleMonsters[0];
+    this.player.mana -= manaCost;
+    const dmg = 6 + RNG.int(1, 6);
+    target.hp -= dmg;
+    this.logMessage(`You unleash an arcane bolt at the ${target.name} for ${dmg} damage.`);
+    if (target.hp <= 0) {
+      this.killMonster(target, true);
+    }
+    return true;
+  },
+
+  monsterTurn() {
+    for (const monster of this.monsters) {
+      if (!monster.alive) continue;
+      const dx = this.player.x - monster.x;
+      const dy = this.player.y - monster.y;
+      const dist = Math.max(Math.abs(dx), Math.abs(dy));
+      if (dist <= 1) {
+        this.monsterAttack(monster);
+        continue;
+      }
+
+      const stepOptions = [];
+      if (dx !== 0) stepOptions.push({ dx: Math.sign(dx), dy: 0 });
+      if (dy !== 0) stepOptions.push({ dx: 0, dy: Math.sign(dy) });
+      if (stepOptions.length === 2 && Math.random() < 0.5) stepOptions.reverse();
+
+      for (const step of stepOptions) {
+        const nx = monster.x + step.dx;
+        const ny = monster.y + step.dy;
+        if (!this.inBounds(nx, ny)) continue;
+        if (this.map.tiles[ny][nx].type === TileType.Wall) continue;
+        if (this.monsterAt(nx, ny)) continue;
+        if (this.player.x === nx && this.player.y === ny) continue;
+        monster.x = nx;
+        monster.y = ny;
+        break;
+      }
+    }
+  },
+
+  playerAttack(monster) {
+    const roll = RNG.int(1, 6);
+    const damage = Math.max(0, this.player.attack + roll - monster.defense);
+    if (damage <= 0) {
+      this.logMessage(`You miss the ${monster.name}.`);
+      return;
+    }
+    monster.hp -= damage;
+    this.logMessage(`You hit the ${monster.name} for ${damage} damage.`);
+    if (monster.hp <= 0) {
+      this.killMonster(monster, false);
+    }
+  },
+
+  killMonster(monster, bySpell) {
+    monster.alive = false;
+    this.player.kills += 1;
+    this.player.xp += monster.xpReward;
+    const source = bySpell ? "spell" : "blow";
+    this.logMessage(`The ${monster.name} dies from your ${source}.`);
+    if (Math.random() < 0.2) {
+      const gold = ItemDefinitions.gold(this.depth);
+      gold.x = monster.x;
+      gold.y = monster.y;
+      this.items.push(gold);
+      this.logMessage(`The ${monster.name} drops ${gold.amount} gold.`);
+    }
+    this.checkLevelUp();
+  },
+
+  monsterAttack(monster) {
+    const roll = RNG.int(1, 6);
+    const damage = Math.max(0, monster.attack + roll - this.player.defense);
+    if (damage <= 0) {
+      this.logMessage(`The ${monster.name} misses you.`);
+      return;
+    }
+    this.player.hp -= damage;
+    this.logMessage(`The ${monster.name} hits you for ${damage} damage!`);
+    if (this.player.hp <= 0) {
+      this.handleDeath();
+    }
+  },
+
+  checkLevelUp() {
+    while (this.player.xp >= this.player.nextLevelXp) {
+      this.player.level += 1;
+      this.player.xp -= this.player.nextLevelXp;
+      this.player.nextLevelXp = Math.floor(this.player.nextLevelXp * 1.4);
+      const hpGain = RNG.int(4, 6);
+      const manaGain = RNG.int(2, 4);
+      this.player.maxHp += hpGain;
+      this.player.maxMana += manaGain;
+      this.player.attack += 1;
+      this.player.defense += 1;
+      this.player.hp = this.player.maxHp;
+      this.player.mana = this.player.maxMana;
+      this.logMessage(`You reach level ${this.player.level}! Stronger than ever.`);
+    }
+  },
+
+  handleDeath() {
+    this.logMessage("You have died. Your adventure ends here.");
+    this.gameOver = true;
+    this.computeScore();
+    this.saveHighScore();
+    this.overlayText.textContent = `You perished on depth ${this.depth} with a score of ${this.score}.`;
+    this.overlay.hidden = false;
+  },
+
+  computeScore() {
+    this.score =
+      this.player.gold +
+      this.player.kills * 10 +
+      (this.depth - 1) * 50 +
+      this.player.level * 20;
+  },
+
+  inBounds(x, y) {
+    return x >= 0 && y >= 0 && x < MAP_WIDTH && y < MAP_HEIGHT;
+  },
+
+  isBlocked(x, y) {
+    if (!this.inBounds(x, y)) return true;
+    if (this.map.tiles[y][x].type === TileType.Wall) return true;
+    if (this.monsterAt(x, y)) return true;
+    if (this.player.x === x && this.player.y === y) return true;
+    return false;
+  },
+
+  monsterAt(x, y) {
+    return this.monsters.find((m) => m.alive && m.x === x && m.y === y);
+  },
+
+  itemAt(x, y) {
+    return this.items.find((item) => item.x === x && item.y === y);
+  },
+
+  logMessage(text) {
+    this.log.push(text);
+    if (this.log.length > 6) this.log.shift();
+    const logContainer = document.getElementById("log");
+    logContainer.innerHTML = this.log.map((entry) => `<p>${entry}</p>`).join("");
+  },
+
+  computeFOV() {
+    for (let y = 0; y < MAP_HEIGHT; y++) {
+      for (let x = 0; x < MAP_WIDTH; x++) {
+        this.map.tiles[y][x].visible = false;
+      }
+    }
+    for (let dy = -FOV_RADIUS; dy <= FOV_RADIUS; dy++) {
+      for (let dx = -FOV_RADIUS; dx <= FOV_RADIUS; dx++) {
+        const x = this.player.x + dx;
+        const y = this.player.y + dy;
+        if (!this.inBounds(x, y)) continue;
+        if (dx * dx + dy * dy > FOV_RADIUS * FOV_RADIUS) continue;
+        const line = bresenhamLine(this.player.x, this.player.y, x, y);
+        let blocked = false;
+        for (const point of line) {
+          const tile = this.map.tiles[point.y][point.x];
+          tile.visible = true;
+          tile.explored = true;
+          if (tile.type === TileType.Wall && !(point.x === x && point.y === y)) {
+            blocked = true;
+            break;
+          }
+        }
+        if (blocked) continue;
+      }
+    }
+  },
+
+  isVisible(x, y) {
+    return this.inBounds(x, y) && this.map.tiles[y][x].visible;
+  },
+
+  updateSidebar() {
+    const stats = document.getElementById("stats");
+    stats.innerHTML = `
+      <strong>Depth:</strong> ${this.depth}<br/>
+      <strong>HP:</strong> ${this.player.hp}/${this.player.maxHp}<br/>
+      <strong>Mana:</strong> ${this.player.mana}/${this.player.maxMana}<br/>
+      <strong>Attack:</strong> ${this.player.attack} &nbsp; <strong>Defense:</strong> ${this.player.defense}<br/>
+      <strong>Level:</strong> ${this.player.level} (XP ${this.player.xp}/${this.player.nextLevelXp})<br/>
+      <strong>Kills:</strong> ${this.player.kills}<br/>
+      <strong>Gold:</strong> ${this.player.gold}
+    `;
+    const inventory = document.getElementById("inventory");
+    if (this.player.inventory.length === 0) {
+      inventory.innerHTML = "<strong>Inventory</strong><br/><span class='dim'>Empty</span>";
+    } else {
+      inventory.innerHTML =
+        "<strong>Inventory</strong><br/>" +
+        this.player.inventory
+          .map((item, i) => `${i + 1}. ${item.name}`)
+          .join("<br/>");
+    }
+    this.updateHighScorePanel();
+  },
+
+  updateHighScorePanel() {
+    document.getElementById("highscore").innerHTML = `
+      <strong>Score</strong><br/>
+      Current Run: ${this.score}<br/>
+      Best Run: ${this.highScore}
+    `;
+  },
+
+  render() {
+    ctx.fillStyle = "#080a0f";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    for (let y = 0; y < MAP_HEIGHT; y++) {
+      for (let x = 0; x < MAP_WIDTH; x++) {
+        const tile = this.map.tiles[y][x];
+        const px = x * TILE_SIZE;
+        const py = y * TILE_SIZE;
+        let bg = "#05070c";
+        if (tile.explored) {
+          bg = tile.visible ? "#111622" : "#05070c";
+          if (tile.type === TileType.Wall) {
+            bg = tile.visible ? "#1a1f2b" : "#090b12";
+          }
+        }
+        ctx.fillStyle = bg;
+        ctx.fillRect(px, py, TILE_SIZE, TILE_SIZE);
+
+        if (tile.explored) {
+          if (tile.type === TileType.Wall) {
+            ctx.fillStyle = tile.visible ? "#4e5a7a" : "#1e2535";
+            ctx.fillText("#", px + 2, py + TILE_SIZE - 2);
+          } else if (tile.type === TileType.Stairs) {
+            ctx.fillStyle = tile.visible ? "#f0c674" : "#4a3d1f";
+            ctx.fillText(">", px + 2, py + TILE_SIZE - 2);
+          } else if (tile.visible) {
+            ctx.fillStyle = "#2b3650";
+            ctx.fillText(".", px + 2, py + TILE_SIZE - 2);
+          }
+        }
+      }
+    }
+
+    for (const item of this.items) {
+      if (!this.isVisible(item.x, item.y)) continue;
+      ctx.fillStyle = item.color;
+      ctx.fillText(item.char, item.x * TILE_SIZE + 2, item.y * TILE_SIZE + TILE_SIZE - 2);
+    }
+
+    for (const monster of this.monsters) {
+      if (!monster.alive) continue;
+      if (!this.isVisible(monster.x, monster.y)) continue;
+      ctx.fillStyle = monster.color;
+      ctx.fillText(monster.char, monster.x * TILE_SIZE + 2, monster.y * TILE_SIZE + TILE_SIZE - 2);
+    }
+
+    ctx.fillStyle = this.player.color;
+    ctx.fillText(
+      this.player.char,
+      this.player.x * TILE_SIZE + 2,
+      this.player.y * TILE_SIZE + TILE_SIZE - 2
+    );
+
+    if (this.gameOver) {
+      ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+  },
+
+  // Optional helper for debugging from console
+  debugReveal() {
+    for (let y = 0; y < MAP_HEIGHT; y++) {
+      for (let x = 0; x < MAP_WIDTH; x++) {
+        this.map.tiles[y][x].visible = true;
+        this.map.tiles[y][x].explored = true;
+      }
+    }
+    this.render();
+  }
+};
+
+Game.init();
+</script>
+</body>
+</html>
